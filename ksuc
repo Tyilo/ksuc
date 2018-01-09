@@ -6,12 +6,17 @@ import os
 import sys
 import re
 from collections import defaultdict
+
 from pygments.lexers.asm import NasmLexer
+from pygments.styles.native import NativeStyle
+
 from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.layout.lexers import PygmentsLexer
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.contrib.completers import WordCompleter
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.styles import style_from_pygments
+
 from termcolor import colored
 import keystone
 from keystone import Ks, KsError
@@ -62,7 +67,7 @@ ARCH_INFO = {
 def get_line(history=None, completer=None):
 	if sys.stdin.isatty():
 		try:
-			return prompt('> ', lexer=PygmentsLexer(NasmLexer), history=history, completer=completer)
+			return prompt('> ', lexer=PygmentsLexer(NasmLexer), history=history, completer=completer, style=style_from_pygments(NativeStyle))
 		except KeyboardInterrupt:
 			return ''
 	else:

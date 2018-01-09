@@ -23,6 +23,13 @@ class PtraceChild:
 		address = self.alloc(self.CODE_SIZE)
 		self.reg_write(arch_info['instruction_pointer'], address)
 
+	def stop(self):
+		self.p.kill()
+		self.p.wait()
+
+		self.p.stdin.close()
+		self.p.stdout.close()
+
 	def _fix_arg(self, arg):
 		if isinstance(arg, bytes):
 			return arg
@@ -63,37 +70,87 @@ class PtraceChild:
 		self._com('start', start_address, stop_address)
 
 
+import unittest
+
+class TestX86_64(unittest.TestCase):
+	def setUp(self):
+		arch_info = {
+			'arch': 'X86',
+			'mode': '64',
+			'instruction_pointer': 'RIP',
+		}
+		self.emu = PtraceChild(arch_info)
+		self.mem = self.emu.alloc(0x1000)
+
+	def tearDown(self):
+		self.emu.stop()
+
+	def test_mem(self):
+		bs = b''
+		i = 0
+		while i < 20:
+			self.emu.mem_write(self.mem, bs)
+			self.assertEqual(bs, self.emu.mem_read(self.mem, len(bs)))
+
+			bs += bytes(chr(i), 'ascii')
+			i += 1
+
+	def	test_reg(self):
+		self.emu.reg_write('rbx', 1234)
+		self.assertEqual(self.emu.reg_read('rbx'), 1234)
+
+	def test_code(self):
+		from binascii import unhexlify
+		# mov rax, 5678; inc eax
+		code = unhexlify(b'48c7c02e160000' + b'ffc0')
+		self.emu.mem_write(self.mem, code)
+
+		end = self.mem + len(code)
+		self.emu.start(self.mem, end)
+
+		self.assertEqual(self.emu.reg_read('rip'), end)
+		self.assertEqual(self.emu.reg_read('rax'), 5679)
+
+
+class TestX86_32(unittest.TestCase):
+	def setUp(self):
+		arch_info = {
+			'arch': 'X86',
+			'mode': '32',
+			'instruction_pointer': 'EIP',
+		}
+		self.emu = PtraceChild(arch_info)
+		self.mem = self.emu.alloc(0x1000)
+		print(self.mem)
+
+	def tearDown(self):
+		self.emu.stop()
+
+	def test_mem(self):
+		bs = b''
+		i = 0
+		while i < 20:
+			self.emu.mem_write(self.mem, bs)
+			self.assertEqual(bs, self.emu.mem_read(self.mem, len(bs)))
+
+			bs += bytes(chr(i), 'ascii')
+			i += 1
+
+	def	test_reg(self):
+		self.emu.reg_write('ebx', 1234)
+		self.assertEqual(self.emu.reg_read('ebx'), 1234)
+
+	def test_code(self):
+		from binascii import unhexlify
+		# mov eax, 5678; inc eax
+		code = unhexlify(b'b82e160000' + b'40')
+		self.emu.mem_write(self.mem, code)
+
+		end = self.mem + len(code)
+		self.emu.start(self.mem, end)
+
+		#self.assertEqual(self.emu.reg_read('eip'), end)
+		self.assertEqual(self.emu.reg_read('eax'), 5679)
+
 if __name__ == '__main__':
-	arch_info = {
-		'arch': 'X86',
-		'mode': '64',
-		'instruction_pointer': 'RIP',
-	}
-	pc = PtraceChild(arch_info)
-
-	mem = pc.alloc(0x1000)
-
-	bs = b''
-	i = 0
-	while i < 20:
-		pc.mem_write(mem, bs)
-		assert bs == pc.mem_read(mem, len(bs))
-
-		bs += bytes(chr(i), 'ascii')
-		i += 1
-
-	pc.reg_write('rbx', 1234)
-	assert pc.reg_read('rbx') == 1234
-
-	from binascii import unhexlify
-	# mov rax, 5678; inc eax
-	code = unhexlify(b'48c7c02e160000' + b'ffc0')
-	pc.mem_write(mem, code)
-
-	end = mem + len(code)
-	pc.start(mem, end)
-
-	assert pc.reg_read('rip') == end
-	assert pc.reg_read('rax') == 5679
-
-	print('Seems to work')
+	unittest.main()

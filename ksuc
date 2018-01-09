@@ -1,0 +1,421 @@
+#!/usr/bin/env python
+
+from ptrace_child import PtraceChild
+
+import os
+import sys
+import re
+from collections import defaultdict
+from pygments.lexers.asm import NasmLexer
+from prompt_toolkit.shortcuts import prompt
+from prompt_toolkit.layout.lexers import PygmentsLexer
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.contrib.completers import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
+from termcolor import colored
+import keystone
+from keystone import Ks, KsError
+import unicorn
+from unicorn import Uc, UcError
+
+COMMAND_PREFIX = '.'
+VARIABLE_PREFIX = '$'
+
+def num_regs(prefix, start, stop):
+	return [prefix + str(i) for i in range(start, stop + 1)]
+
+ARCH_INFO = {
+	'x86_64': {
+		'arch': 'X86',
+		'mode': '64',
+		'registers': ['RAX', 'RBX', 'RCX', 'RDX', 'RDI', 'RSI', *num_regs('R', 8, 15), 'RIP', 'RSP', 'RBP'],
+		'instruction_pointer': 'RIP',
+		'stack_pointer': 'RSP',
+	},
+	'x86': {
+		'arch': 'X86',
+		'mode': '32',
+		'registers': ['EAX', 'EBX', 'ECX', 'EDX', 'EDI', 'ESI', 'EIP', 'ESP', 'EBP'],
+		'instruction_pointer': 'EIP',
+		'stack_pointer': 'ESP',
+	},
+	'arm': {
+		'arch': 'ARM',
+		'mode': 'ARM',
+		'registers': [*num_regs('R', 0, 12), 'SP', 'LR', 'PC'],
+		'instruction_pointer': 'PC',
+		'stack_pointer': 'SP',
+	},
+	'arm64': {
+		'arch': 'ARM64',
+		'mode': 'LITTLE_ENDIAN',
+		'registers': [*num_regs('X', 0, 30), 'LR', 'SP', 'PC'],
+		'instruction_pointer': 'PC',
+		'stack_pointer': 'SP',
+	},
+}
+
+def get_line(history=None, completer=None):
+	if sys.stdin.isatty():
+		try:
+			return prompt('> ', lexer=PygmentsLexer(NasmLexer), history=history, completer=completer)
+		except KeyboardInterrupt:
+			return ''
+	else:
+		return input()
+
+class AsmCompleter(Completer):
+	def __init__(self, const):
+		keywords = defaultdict(list)
+
+		for c in dir(const):
+			for prefix in ['UC_X86_INS_', 'UC_X86_REG_']:
+				if c.startswith(prefix):
+					keywords[prefix].append(c[len(prefix):].lower())
+					break
+
+		self.instructions = keywords['UC_X86_INS_']
+		self.registers = keywords['UC_X86_REG_']
+
+	def complete(self, l, word):
+		for x in l:
+			if x.startswith(word):
+				yield Completion(x, start_position=-len(word))
+
+	def get_completions(self, document, complete_event):
+		if document.text.startswith(COMMAND_PREFIX):
+			return
+
+		words = document.text.lower().split(' ')
+
+		if len(words) == 1:
+			yield from self.complete(self.instructions, words[0])
+		else:
+			yield from self.complete(self.registers, words[-1])
+
+class UnicornEmulator(Uc):
+	def __init__(self, arch, mode):
+		super().__init__(getattr(unicorn, 'UC_ARCH_%s' % arch), getattr(unicorn, 'UC_MODE_%s' % mode))
+
+class State:
+	START_ADDRESS = 2**24
+	CODE_SIZE = 2**20
+
+	HEAP_START = 2**27
+
+	STACK_ADDRESS = 2**32 - 2**21
+	STACK_SIZE = 2**20
+
+	PAGE_SIZE = 2**12
+
+	def resolve_sym(self, symbol):
+		print(symbol)
+		return False
+
+	def __init__(self, arch_info, Emulator=UnicornEmulator):
+		self.arch_info = arch_info
+
+		self.arch = self.arch_info['arch']
+		self.mode = self.arch_info['mode']
+
+		self.ks = Ks(getattr(keystone, 'KS_ARCH_%s' % self.arch), getattr(keystone, 'KS_MODE_%s' % self.mode))
+		self.mu = Emulator(self.arch, self.mode)
+
+		self.variables = defaultdict(list)
+
+		# TODO: This doesn't work seem to work...
+		# self.ks.sym_resolver = self.resolve_sym
+
+		self.mu.mem_map(self.START_ADDRESS, self.CODE_SIZE)
+		self.mu.mem_map(self.STACK_ADDRESS - self.STACK_SIZE, self.STACK_SIZE)
+
+		self.address = self.START_ADDRESS
+		self.write_reg(self.stack_pointer, self.STACK_ADDRESS)
+
+		self.last_regs = self.get_regs()
+
+		'''
+		with open('/usr/lib/musl/lib/libc.so', 'rb') as f:
+			libc = f.read()
+			s = len(libc) + (self.PAGE_SIZE - len(libc) % self.PAGE_SIZE)
+			self.mu.mem_map(0, s)
+			self.mu.mem_write(0, libc)
+
+		off = 329279
+		off = 0x1b2a0
+		off = 0x5080e
+		add = 0 + off
+		#self.mu.mem_write(add, b'\xc3')
+		#self.emu_start(add, add + 2)
+		print(add)
+		'''
+
+	@property
+	def stack_pointer(self):
+		return self.arch_info['stack_pointer']
+
+	@property
+	def instruction_pointer(self):
+		return self.arch_info['instruction_pointer']
+
+	def reg_index(self, reg):
+		reg = reg.strip().upper()
+		const = getattr(unicorn, '%s_const' % self.arch.lower())
+		return getattr(const, 'UC_%s_REG_%s' % (self.arch, reg))
+
+	def read_reg(self, reg):
+		return self.mu.reg_read(self.reg_index(reg))
+
+	def write_reg(self, reg, value):
+		self.mu.reg_write(self.reg_index(reg), value)
+
+	def new_var(self, group, value):
+		n = len(self.variables[group])
+		self.variables[group].append(value)
+		return '%s%s%s' % (VARIABLE_PREFIX, group, n)
+
+	def get_value(self, s):
+		try:
+			return int(s)
+		except ValueError:
+			try:
+				return self.read_reg(s)
+			except AttributeError:
+				raise ValueError()
+
+	def cmd_show(self, arg):
+		self.print_regs(self.get_regs())
+		return True
+
+	def cmd_printf(self, arg):
+		print('Not implemented')
+		return False
+		m = re.match('"([^"]*)"\s+.*', arg)
+		if not m:
+			print('Usage: .printf "format" args...')
+			return False
+		else:
+			format, args = m.groups()
+			return True
+
+	def cmd_print(self, arg):
+		for i, arg in enumerate(map(self.get_value, arg.split())):
+			if i != 0:
+				print(' ', end='')
+			print(arg, end='')
+		print()
+		return True
+
+	def cmd_set(self, arg):
+		args = arg.split()
+		if len(args) != 2:
+			print('Usage: .set register value')
+			return False
+		else:
+			reg = args[0]
+			value = self.get_value(args[1])
+			self.write_reg(reg, value)
+			return True
+
+	def cmd_readhex(self, arg):
+		args = arg.split()
+		if len(args) != 2:
+			print('Usage: .readhex address length')
+			return False
+		else:
+			address, length = map(self.get_value, args)
+			memory = self.mu.mem_read(address, length)
+			print(*('%02x' % m for m in memory), sep='')
+			return True
+
+	def cmd_readstr(self, arg):
+		args = arg.split()
+		if len(args) not in [1, 2]:
+			print('Usage: .readstr address [length]')
+			return False
+		else:
+			address = self.get_value(args[0])
+			if len(args) == 2:
+				length = self.get_value(args[1])
+				s = self.mu.mem_read(address, length)
+			else:
+				s = b''
+				while True:
+					b = self.mu.mem_read(address, 1)
+					if b == b'\x00':
+						break
+
+					s += bytes(b)
+					address += 1
+
+			print(str(s, 'utf-8', 'backslashreplace'))
+			return True
+
+	def cmd_writehex(self, arg):
+		print('Not implemented')
+		return False
+
+	def cmd_writestr(self, arg):
+		print('Not implemented')
+		return False
+
+	def _alloc(self, length):
+		if length % self.PAGE_SIZE != 0:
+			length += self.PAGE_SIZE - length % self.PAGE_SIZE
+
+		address = self.HEAP_START
+		regions = sorted(self.mu.mem_regions())
+		for start, end, _ in regions:
+			if end + 1 < self.HEAP_START:
+				continue
+
+			if address < start and address + length <= start:
+				break
+
+			address = end + 1
+
+		self.mu.mem_map(address, length)
+		return address, length
+
+	def cmd_alloc(self, arg):
+		args = arg.split()
+		if len(args) != 1:
+			print('Usage: .alloc length')
+			return False
+		else:
+			length = self.get_value(args[0])
+			address, alloc_length = self._alloc(length)
+			var = self.new_var('alloc', address)
+			print('Allocated %s bytes at %s (= %s)' % (alloc_length, address, var))
+			return True
+
+	def cmd_allocstr(self, arg):
+		arg = bytes(arg.strip(), 'utf-8')
+
+		length = len(arg) + 1
+		address, alloc_length = self._alloc(length)
+		self.mu.mem_write(address, arg + b'\x00')
+		var = self.new_var('str', address)
+		print('Allocated string with length %s at %s (= %s)' % (length, address, var))
+
+		return True
+
+	def get_var(self, var):
+		m = re.match(re.escape(VARIABLE_PREFIX) + '(\\S+)(\\d+)', var)
+		if m:
+			group = m.group(1)
+			n = int(m.group(2))
+			if n < len(self.variables[group]):
+				return self.variables[group][n]
+
+		return None
+
+	def get_var_str(self, var):
+		r = self.get_var(var)
+		if r:
+			return str(r)
+
+		return var
+
+	def execute(self, line, print_regs):
+		line = line.strip()
+		if not line:
+			return True
+
+		line = re.sub(re.escape(VARIABLE_PREFIX) + '\S+\\d+', lambda m: self.get_var_str(m.group()), line)
+
+		if line.startswith(COMMAND_PREFIX):
+			split = line.split(maxsplit=1)
+			cmd = split[0][len(COMMAND_PREFIX):]
+
+			method = getattr(self, 'cmd_%s' % cmd, None)
+			if method:
+				return method('' if len(split) <= 1 else split[1])
+			else:
+				print('Unknown command:', cmd)
+				return False
+		else:
+			try:
+				encoding, count = self.ks.asm(line)
+			except KsError as e:
+				print('Got error while assembling:')
+				print(line)
+				print(e)
+				return False
+
+			# Apparently assembling can fail without an exception
+			if encoding == None:
+				print('Got unknown error while assembling:')
+				print(line)
+				return False
+
+			self.mu.mem_write(self.address, bytes(encoding))
+			try:
+				self.mu.emu_start(self.address, self.address + len(encoding))
+			except UcError as e:
+				print('Got error while executing:')
+				print(line)
+				print(e)
+				return False
+
+			regs = self.get_regs()
+			if print_regs:
+				self.print_regs(regs)
+			self.last_regs = regs
+
+			self.address = self.read_reg(self.instruction_pointer)
+
+		return True
+
+	def get_regs(self):
+		regs = {}
+		for i, reg in enumerate(self.arch_info['registers']):
+			regs[reg] = self.read_reg(reg)
+
+		return regs
+
+	def print_regs(self, regs):
+		for i, (reg, value) in enumerate(regs.items()):
+			if i != 0 and i % 3 == 0:
+				print()
+			color = None if self.last_regs[reg] == value else 'red'
+			print(('%3s: ' + colored('%016x', color)) % (reg, value), end='  ')
+
+		print()
+		print()
+
+
+def main():
+	interactive = sys.stdin.isatty()
+
+	arch_str = 'x86_64'
+
+	if len(sys.argv) >= 2:
+		arch_str = sys.argv[1]
+
+	Emulator = UnicornEmulator
+	if len(sys.argv) >= 3:
+		if int(sys.argv[2]):
+			Emulator = PtraceChild
+
+	history = None
+	completer = None
+	if interactive:
+		history = FileHistory(os.path.expanduser('~/.ksuc_history'))
+
+		arch = ARCH_INFO[arch_str]['arch'].lower()
+		const = getattr(unicorn, '%s_const' % arch)
+		completer = AsmCompleter(const)
+
+	state = State(ARCH_INFO[arch_str], Emulator)
+	while True:
+		try:
+			line = get_line(history, completer)
+		except EOFError:
+			break
+
+		if not state.execute(line, interactive) and not interactive:
+			break
+
+if __name__ == '__main__':
+	sys.exit(main())

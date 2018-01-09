@@ -164,10 +164,10 @@ int main() {
 
 		std::string cmd;
 		while (std::cin >> cmd) {
-			if (cmd == "mem_map") {
+			if (cmd == "alloc") {
 				log << "mem_map" << std::endl;
-				size_t address, size;
-				std::cin >> address >> size;
+				size_t size;
+				std::cin >> size;
 				std::cout << allocate(size) << std::endl;
 			} else if (cmd == "mem_write") {
 				log << "mem_write" << std::endl;
@@ -213,8 +213,8 @@ int main() {
 				std::cout << value << std::endl;
 
 				log << value << std::endl;
-			} else if (cmd == "emu_start") {
-				log << "emu_start" << std::endl;
+			} else if (cmd == "start") {
+				log << "start" << std::endl;
 				size_t start_address, stop_address;
 				std::cin >> start_address >> stop_address;
 

@@ -1,7 +1,5 @@
 from subprocess import Popen, PIPE
 from pathlib import Path
-import unicorn
-from unicorn.x86_const import *
 
 _dir = Path(__file__).parent.absolute()
 
@@ -12,17 +10,13 @@ class PtraceChild:
 		'32': ['ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'eax', 'xds', 'xes', 'xfs', 'xgs', 'orig_eax', 'eip', 'xcs', 'eflags', 'esp', 'xss'],
 	}
 
-	def __init__(self, arch, mode):
+	def __init__(self, arch_info):
+		arch = arch_info['arch']
+		mode = arch_info['mode']
 		assert arch == 'X86'
 
 		self.p = Popen([str(_dir / 'ptrace_child')], stdin=PIPE, stdout=PIPE)
-
-		const = getattr(unicorn, '%s_const' % arch.lower())
-		self.regd = {}
-		for i, reg in enumerate(self.USER_REGS[mode]):
-			uc_index = getattr(const, 'UC_%s_REG_%s' % (arch, reg.upper()), None)
-			if uc_index != None:
-				self.regd[uc_index] = i
+		self.regs = self.USER_REGS[mode]
 
 	def _fix_arg(self, arg):
 		if isinstance(arg, bytes):
@@ -38,8 +32,14 @@ class PtraceChild:
 		self._write(*args)
 		return self.p.stdout.readline()
 
-	def mem_map(self, address, size):
-		return int(self._com('mem_map', address, size), 0)
+	def _reg_index(self, reg):
+		return self.regs.index(reg.lower())
+
+	def reg_read(self, reg):
+		return int(self._com('reg_read', self._reg_index(reg)), 0)
+
+	def reg_write(self, reg, value):
+		self._com('reg_write', self._reg_index(reg), value)
 
 	def mem_read(self, address, size):
 		self._write('mem_read', address, size)
@@ -51,18 +51,12 @@ class PtraceChild:
 	def mem_write(self, address, bs):
 		self._com('mem_write', address, len(bs), bs)
 
-	def reg_read(self, reg_index):
-		return int(self._com('reg_read', self.regd[reg_index]), 0)
+	def alloc(self, size):
+		return int(self._com('alloc', size), 0)
 
-	def reg_write(self, reg_index, value):
-		self._com('reg_write', self.regd[reg_index], value)
+	def start(self, start_address, stop_address):
+		self._com('start', start_address, stop_address)
 
-	def emu_start(self, start_address, stop_address):
-		self._com('emu_start', start_address, stop_address)
-
-	def mem_regions(self):
-		# TODO?
-		return []
 
 if __name__ == '__main__':
 	pc = PtraceChild('X86', '64')

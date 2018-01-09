@@ -31,6 +31,7 @@ ARCH_INFO = {
 		'registers': ['RAX', 'RBX', 'RCX', 'RDX', 'RDI', 'RSI', *num_regs('R', 8, 15), 'RIP', 'RSP', 'RBP'],
 		'instruction_pointer': 'RIP',
 		'stack_pointer': 'RSP',
+		'page_size': 2**12,
 	},
 	'x86': {
 		'arch': 'X86',
@@ -38,6 +39,7 @@ ARCH_INFO = {
 		'registers': ['EAX', 'EBX', 'ECX', 'EDX', 'EDI', 'ESI', 'EIP', 'ESP', 'EBP'],
 		'instruction_pointer': 'EIP',
 		'stack_pointer': 'ESP',
+		'page_size': 2**12,
 	},
 	'arm': {
 		'arch': 'ARM',
@@ -45,6 +47,7 @@ ARCH_INFO = {
 		'registers': [*num_regs('R', 0, 12), 'SP', 'LR', 'PC'],
 		'instruction_pointer': 'PC',
 		'stack_pointer': 'SP',
+		'page_size': 2**12,
 	},
 	'arm64': {
 		'arch': 'ARM64',
@@ -52,6 +55,7 @@ ARCH_INFO = {
 		'registers': [*num_regs('X', 0, 30), 'LR', 'SP', 'PC'],
 		'instruction_pointer': 'PC',
 		'stack_pointer': 'SP',
+		'page_size': 2**12,
 	},
 }
 
@@ -93,11 +97,7 @@ class AsmCompleter(Completer):
 		else:
 			yield from self.complete(self.registers, words[-1])
 
-class UnicornEmulator(Uc):
-	def __init__(self, arch, mode):
-		super().__init__(getattr(unicorn, 'UC_ARCH_%s' % arch), getattr(unicorn, 'UC_MODE_%s' % mode))
-
-class State:
+class UnicornEmulator:
 	START_ADDRESS = 2**24
 	CODE_SIZE = 2**20
 
@@ -106,8 +106,54 @@ class State:
 	STACK_ADDRESS = 2**32 - 2**21
 	STACK_SIZE = 2**20
 
-	PAGE_SIZE = 2**12
+	def __init__(self, arch_info):
+		self.arch = arch_info['arch']
+		self.mode = arch_info['mode']
+		self.uc = Uc(getattr(unicorn, 'UC_ARCH_%s' % self.arch), getattr(unicorn, 'UC_MODE_%s' % self.mode))
 
+		self.uc.mem_map(self.START_ADDRESS, self.CODE_SIZE)
+		self.uc.mem_map(self.STACK_ADDRESS - self.STACK_SIZE, self.STACK_SIZE)
+
+		self.reg_write(arch_info['instruction_pointer'], self.START_ADDRESS)
+		self.reg_write(arch_info['stack_pointer'], self.STACK_ADDRESS)
+
+	def _reg_index(self, reg):
+		reg = reg.strip().upper()
+		const = getattr(unicorn, '%s_const' % self.arch.lower())
+		return getattr(const, 'UC_%s_REG_%s' % (self.arch, reg))
+
+	def reg_read(self, reg):
+		return self.uc.reg_read(self._reg_index(reg))
+
+	def reg_write(self, reg, value):
+		self.uc.reg_write(self._reg_index(reg), value)
+
+	def mem_read(self, address, size):
+		return self.uc.mem_read(address, size)
+
+	def mem_write(self, address, bs):
+		return self.uc.mem_write(address, bs)
+
+	def alloc(self, length):
+		address = self.HEAP_START
+		regions = sorted(self.uc.mem_regions())
+		for start, end, _ in regions:
+			if end + 1 < self.HEAP_START:
+				continue
+
+			if address < start and address + length <= start:
+				break
+
+			address = end + 1
+
+		self.uc.mem_map(address, length)
+		return address
+
+	def start(self, start_address, stop_address):
+		self.uc.emu_start(start_address, stop_address)
+
+
+class State:
 	def resolve_sym(self, symbol):
 		print(symbol)
 		return False
@@ -119,18 +165,12 @@ class State:
 		self.mode = self.arch_info['mode']
 
 		self.ks = Ks(getattr(keystone, 'KS_ARCH_%s' % self.arch), getattr(keystone, 'KS_MODE_%s' % self.mode))
-		self.mu = Emulator(self.arch, self.mode)
+		self.emu = Emulator(arch_info)
 
 		self.variables = defaultdict(list)
 
 		# TODO: This doesn't work seem to work...
 		# self.ks.sym_resolver = self.resolve_sym
-
-		self.mu.mem_map(self.START_ADDRESS, self.CODE_SIZE)
-		self.mu.mem_map(self.STACK_ADDRESS - self.STACK_SIZE, self.STACK_SIZE)
-
-		self.address = self.START_ADDRESS
-		self.write_reg(self.stack_pointer, self.STACK_ADDRESS)
 
 		self.last_regs = self.get_regs()
 
@@ -151,23 +191,8 @@ class State:
 		'''
 
 	@property
-	def stack_pointer(self):
-		return self.arch_info['stack_pointer']
-
-	@property
 	def instruction_pointer(self):
 		return self.arch_info['instruction_pointer']
-
-	def reg_index(self, reg):
-		reg = reg.strip().upper()
-		const = getattr(unicorn, '%s_const' % self.arch.lower())
-		return getattr(const, 'UC_%s_REG_%s' % (self.arch, reg))
-
-	def read_reg(self, reg):
-		return self.mu.reg_read(self.reg_index(reg))
-
-	def write_reg(self, reg, value):
-		self.mu.reg_write(self.reg_index(reg), value)
 
 	def new_var(self, group, value):
 		n = len(self.variables[group])
@@ -179,7 +204,7 @@ class State:
 			return int(s)
 		except ValueError:
 			try:
-				return self.read_reg(s)
+				return self.emu.reg_read(s)
 			except AttributeError:
 				raise ValueError()
 
@@ -214,7 +239,7 @@ class State:
 		else:
 			reg = args[0]
 			value = self.get_value(args[1])
-			self.write_reg(reg, value)
+			self.emu.reg_write(reg, value)
 			return True
 
 	def cmd_readhex(self, arg):
@@ -224,7 +249,7 @@ class State:
 			return False
 		else:
 			address, length = map(self.get_value, args)
-			memory = self.mu.mem_read(address, length)
+			memory = self.emu.mem_read(address, length)
 			print(*('%02x' % m for m in memory), sep='')
 			return True
 
@@ -237,11 +262,11 @@ class State:
 			address = self.get_value(args[0])
 			if len(args) == 2:
 				length = self.get_value(args[1])
-				s = self.mu.mem_read(address, length)
+				s = self.emu.mem_read(address, length)
 			else:
 				s = b''
 				while True:
-					b = self.mu.mem_read(address, 1)
+					b = self.emu.mem_read(address, 1)
 					if b == b'\x00':
 						break
 
@@ -263,19 +288,7 @@ class State:
 		if length % self.PAGE_SIZE != 0:
 			length += self.PAGE_SIZE - length % self.PAGE_SIZE
 
-		address = self.HEAP_START
-		regions = sorted(self.mu.mem_regions())
-		for start, end, _ in regions:
-			if end + 1 < self.HEAP_START:
-				continue
-
-			if address < start and address + length <= start:
-				break
-
-			address = end + 1
-
-		self.mu.mem_map(address, length)
-		return address, length
+		return self.emu.alloc(length), length
 
 	def cmd_alloc(self, arg):
 		args = arg.split()
@@ -294,7 +307,7 @@ class State:
 
 		length = len(arg) + 1
 		address, alloc_length = self._alloc(length)
-		self.mu.mem_write(address, arg + b'\x00')
+		self.emu.mem_write(address, arg + b'\x00')
 		var = self.new_var('str', address)
 		print('Allocated string with length %s at %s (= %s)' % (length, address, var))
 
@@ -349,9 +362,10 @@ class State:
 				print(line)
 				return False
 
-			self.mu.mem_write(self.address, bytes(encoding))
+			address = self.emu.reg_read(self.instruction_pointer)
+			self.emu.mem_write(address, bytes(encoding))
 			try:
-				self.mu.emu_start(self.address, self.address + len(encoding))
+				self.emu.start(address, address + len(encoding))
 			except UcError as e:
 				print('Got error while executing:')
 				print(line)
@@ -363,14 +377,12 @@ class State:
 				self.print_regs(regs)
 			self.last_regs = regs
 
-			self.address = self.read_reg(self.instruction_pointer)
-
 		return True
 
 	def get_regs(self):
 		regs = {}
 		for i, reg in enumerate(self.arch_info['registers']):
-			regs[reg] = self.read_reg(reg)
+			regs[reg] = self.emu.reg_read(reg)
 
 		return regs
 

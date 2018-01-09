@@ -10,6 +10,8 @@ class PtraceChild:
 		'32': ['ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'eax', 'xds', 'xes', 'xfs', 'xgs', 'orig_eax', 'eip', 'xcs', 'eflags', 'esp', 'xss'],
 	}
 
+	CODE_SIZE = 2**20
+
 	def __init__(self, arch_info):
 		arch = arch_info['arch']
 		mode = arch_info['mode']
@@ -17,6 +19,9 @@ class PtraceChild:
 
 		self.p = Popen([str(_dir / 'ptrace_child')], stdin=PIPE, stdout=PIPE)
 		self.regs = self.USER_REGS[mode]
+
+		address = self.alloc(self.CODE_SIZE)
+		self.reg_write(arch_info['instruction_pointer'], address)
 
 	def _fix_arg(self, arg):
 		if isinstance(arg, bytes):
@@ -59,33 +64,36 @@ class PtraceChild:
 
 
 if __name__ == '__main__':
-	pc = PtraceChild('X86', '64')
-	r = pc.mem_map(0, 0x1000)
+	arch_info = {
+		'arch': 'X86',
+		'mode': '64',
+		'instruction_pointer': 'RIP',
+	}
+	pc = PtraceChild(arch_info)
 
-	'''
-		bs = b''
-		i = 0
-		while i < 20:
-			pc.mem_write(r, bs)
-			print(pc.mem_read(r, len(bs)))
-			bs += bytes(chr(i), 'ascii')
-			i += 1
+	mem = pc.alloc(0x1000)
 
-		print()
+	bs = b''
+	i = 0
+	while i < 20:
+		pc.mem_write(mem, bs)
+		assert bs == pc.mem_read(mem, len(bs))
 
-		print(pc.reg_read(10))
-		pc.reg_write(10, 1234)
-		print(pc.reg_read(10))
-	'''
+		bs += bytes(chr(i), 'ascii')
+		i += 1
 
-	print('start_address:', r)
+	pc.reg_write('rbx', 1234)
+	assert pc.reg_read('rbx') == 1234
 
 	from binascii import unhexlify
-	code = unhexlify(b'48c7c0d2040000' + b'FFC0')
-	print(code)
-	pc.mem_write(r, code)
-	print(pc.mem_read(r, 1))
-	pc.emu_start(r, r + len(code))
-	print('stop_address:', pc.reg_read(UC_X86_REG_RIP))
-	print('RAX:', pc.reg_read(UC_X86_REG_RAX))
+	# mov rax, 5678; inc eax
+	code = unhexlify(b'48c7c02e160000' + b'ffc0')
+	pc.mem_write(mem, code)
 
+	end = mem + len(code)
+	pc.start(mem, end)
+
+	assert pc.reg_read('rip') == end
+	assert pc.reg_read('rax') == 5679
+
+	print('Seems to work')

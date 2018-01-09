@@ -156,12 +156,6 @@ int main() {
 		PTRACE(PTRACE_SEIZE, child_pid, 0, 0);
 		wait(NULL);
 
-		/*
-		printf("%p\n", allocate(pagesize));
-		printf("%p\n", allocate(pagesize));
-		printf("%p\n", allocate(pagesize));
-		*/
-
 		std::string cmd;
 		while (std::cin >> cmd) {
 			if (cmd == "alloc") {
@@ -229,27 +223,6 @@ int main() {
 				write_reg(REG_INDEX(IP), start_address);
 
 				PTRACE(PTRACE_CONT, child_pid, 0, 0);
-				/*waitpid(child_pid, &wstatus, WSTOPPED);
-				log << "exited: " << WIFEXITED(wstatus) << std::endl;
-				log << "signaled: " << WIFSIGNALED(wstatus) << std::endl;
-				log << "coredump: " << WCOREDUMP(wstatus) << std::endl;
-				log << "stopped: " << WIFSTOPPED(wstatus) << std::endl;
-				log << "stopsig: " << WSTOPSIG(wstatus) << std::endl;
-				log << "continued: " << WIFCONTINUED(wstatus) << std::endl;
-				log << "wstatus: " << wstatus << std::endl;
-
-				PTRACE(PTRACE_CONT, child_pid, 0, SIGCONT);
-				wait(&wstatus);
-				//waitpid(child_pid, &wstatus, 0);
-				log << "exited: " << WIFEXITED(wstatus) << std::endl;
-				log << "signaled: " << WIFSIGNALED(wstatus) << std::endl;
-				log << "coredump: " << WCOREDUMP(wstatus) << std::endl;
-				log << "stopped: " << WIFSTOPPED(wstatus) << std::endl;
-				log << "stopsig: " << WSTOPSIG(wstatus) << std::endl;
-				log << "continued: " << WIFCONTINUED(wstatus) << std::endl;
-				log << "wstatus: " << wstatus << std::endl;
-				*/
-
 				wait(NULL);
 
 				write_bytes(stop_address, {replaced_byte});
@@ -264,11 +237,5 @@ int main() {
 		}
 
 		log << "dead" << std::endl;
-
-		/*puts("Continuing...");
-		PTRACE(PTRACE_CONT, child_pid, 0, 0);
-		wait(&wstatus);
-
-		puts("Done");*/
 	}
 }

@@ -16,8 +16,9 @@ class PtraceChild:
 		arch = arch_info['arch']
 		mode = arch_info['mode']
 		assert arch == 'X86'
+		assert mode in ['64', '32']
 
-		self.p = Popen([str(_dir / 'ptrace_child')], stdin=PIPE, stdout=PIPE)
+		self.p = Popen([str(_dir / ('ptrace_child%s' % mode))], stdin=PIPE, stdout=PIPE)
 		self.regs = self.USER_REGS[mode]
 
 		address = self.alloc(self.CODE_SIZE)

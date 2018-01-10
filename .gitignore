@@ -1,2 +1,3 @@
 __pycache__/
-ptrace_child/ptrace_child
+ptrace_child/ptrace_child32
+ptrace_child/ptrace_child64

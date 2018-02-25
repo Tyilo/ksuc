@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <errno.h>
 #include <string.h>
+#include <sched.h>
 
 #include <string>
 #include <iostream>
@@ -143,99 +144,102 @@ void * allocate(size_t length) {
 	return res;
 }
 
+int child_main(void *) {
+	PTRACE(PTRACE_TRACEME, 0, 0, 0);
+	raise(SIGSTOP);
+	return 0;
+}
+
 int main() {
-	child_pid = fork();
-	if (child_pid == 0) {
-		PTRACE(PTRACE_TRACEME, 0, 0, 0);
-		raise(SIGSTOP);
-	} else {
-		log.open("/tmp/ptrace_child.log");
+	std::vector<char> child_stack(1000);
+	child_pid = clone(child_main, child_stack.data() + 1000, 0, NULL);
 
-		log << "test: " << &test << std::endl;
+	log.open("/tmp/ptrace_child.log");
 
-		PTRACE(PTRACE_SEIZE, child_pid, 0, 0);
-		wait(NULL);
+	log << "test: " << &test << std::endl;
 
-		std::string cmd;
-		while (std::cin >> cmd) {
-			if (cmd == "alloc") {
-				log << "mem_map" << std::endl;
-				size_t size;
-				std::cin >> size;
-				std::cout << allocate(size) << std::endl;
-			} else if (cmd == "mem_write") {
-				log << "mem_write" << std::endl;
-				size_t address, size;
-				std::cin >> address >> size;
+	PTRACE(PTRACE_SEIZE, child_pid, 0, 0);
+	wait(NULL);
 
-				char c;
-				std::cin.read(&c, 1);
-				std::vector<char> buffer(size);
-				std::cin.read(buffer.data(), size);
+	std::string cmd;
+	while (std::cin >> cmd) {
+		if (cmd == "alloc") {
+			log << "mem_map" << std::endl;
+			size_t size;
+			std::cin >> size;
+			std::cout << allocate(size) << std::endl;
+		} else if (cmd == "mem_write") {
+			log << "mem_write" << std::endl;
+			size_t address, size;
+			std::cin >> address >> size;
 
-				write_bytes(address, buffer);
+			char c;
+			std::cin.read(&c, 1);
+			std::vector<char> buffer(size);
+			std::cin.read(buffer.data(), size);
 
-				log << "mem_write done" << std::endl;
-				std::cout << std::endl;
-			} else if (cmd == "mem_read") {
-				log << "mem_read" << std::endl;
-				size_t address, size;
-				std::cin >> address >> size;
+			write_bytes(address, buffer);
 
-				//address = (regval_t)&test;
+			log << "mem_write done" << std::endl;
+			std::cout << std::endl;
+		} else if (cmd == "mem_read") {
+			log << "mem_read" << std::endl;
+			size_t address, size;
+			std::cin >> address >> size;
 
-				std::vector<char> buffer = read_bytes(address, size);
-				std::cout.write(buffer.data(), buffer.size());
+			//address = (regval_t)&test;
 
-				log << "mem_read done" << std::endl;
+			std::vector<char> buffer = read_bytes(address, size);
+			std::cout.write(buffer.data(), buffer.size());
 
-				std::cout << std::endl;
-			} else if (cmd == "reg_write") {
-				log << "reg_write" << std::endl;
-				size_t index, value;
-				std::cin >> index >> value;
+			log << "mem_read done" << std::endl;
 
-				write_reg(index, value);
+			std::cout << std::endl;
+		} else if (cmd == "reg_write") {
+			log << "reg_write" << std::endl;
+			size_t index, value;
+			std::cin >> index >> value;
 
-				std::cout << std::endl;
-			} else if (cmd == "reg_read") {
-				log << "reg_read" << std::endl;
-				size_t index;
-				std::cin >> index;
+			write_reg(index, value);
 
-				regval_t value = get_reg(index);
-				std::cout << value << std::endl;
+			std::cout << std::endl;
+		} else if (cmd == "reg_read") {
+			log << "reg_read" << std::endl;
+			size_t index;
+			std::cin >> index;
 
-				log << value << std::endl;
-			} else if (cmd == "start") {
-				log << "start" << std::endl;
-				size_t start_address, stop_address;
-				std::cin >> start_address >> stop_address;
+			regval_t value = get_reg(index);
+			std::cout << value << std::endl;
 
-				{
-					char bbb = read_byte(start_address);
-					log << "first: " << (int)bbb << std::endl;
-				}
+			log << value << std::endl;
+		} else if (cmd == "start") {
+			log << "start" << std::endl;
+			size_t start_address, stop_address;
+			std::cin >> start_address >> stop_address;
 
-				char replaced_byte = read_byte(stop_address);
-				write_bytes(stop_address, {'\xcc'});
-
-				write_reg(REG_INDEX(IP), start_address);
-
-				PTRACE(PTRACE_CONT, child_pid, 0, 0);
-				wait(NULL);
-
-				write_bytes(stop_address, {replaced_byte});
-				write_reg(REG_INDEX(IP), stop_address);
-
-				std::cout << std::endl;
-			} else {
-				log << "unknown: " << cmd << std::endl;
-				std::cerr << "Unknown command: " << cmd << std::endl;
-				return 1;
+			{
+				char bbb = read_byte(start_address);
+				log << "first: " << (int)bbb << std::endl;
 			}
-		}
 
-		log << "dead" << std::endl;
+			char replaced_byte = read_byte(stop_address);
+			write_bytes(stop_address, {'\xcc'});
+
+			write_reg(REG_INDEX(IP), start_address);
+
+			PTRACE(PTRACE_CONT, child_pid, 0, 0);
+			wait(NULL);
+
+			write_bytes(stop_address, {replaced_byte});
+			write_reg(REG_INDEX(IP), stop_address);
+
+			std::cout << std::endl;
+		} else {
+			log << "unknown: " << cmd << std::endl;
+			std::cerr << "Unknown command: " << cmd << std::endl;
+			return 1;
+		}
 	}
+
+	log << "dead" << std::endl;
 }

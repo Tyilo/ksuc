@@ -290,8 +290,9 @@ class State:
 		return False
 
 	def _alloc(self, length):
-		if length % self.PAGE_SIZE != 0:
-			length += self.PAGE_SIZE - length % self.PAGE_SIZE
+		page_size = self.arch_info['page_size']
+		if length % page_size != 0:
+			length += page_size - length % page_size
 
 		return self.emu.alloc(length), length
 
